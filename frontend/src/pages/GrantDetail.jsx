@@ -3,7 +3,7 @@ import { useParams, Link, useNavigate } from "react-router-dom";
 import { api } from "@/lib/api";
 import { toast } from "sonner";
 import { useAuth } from "@/contexts/AuthContext";
-import { ShieldCheck, ExternalLink, Sparkles, Save, CheckCircle2 } from "lucide-react";
+import { ShieldCheck, ExternalLink, Sparkles, Save, CheckCircle2, Download } from "lucide-react";
 
 export default function GrantDetail() {
   const { id } = useParams();
@@ -91,6 +91,25 @@ export default function GrantDetail() {
     } catch (e) { toast.error("Approval failed"); }
   };
 
+  const exportDocx = async () => {
+    if (!draft) return;
+    try {
+      const { data } = await api.get(`/drafts/${draft.id}/export`, { responseType: "blob" });
+      const url = URL.createObjectURL(data);
+      const a = document.createElement("a");
+      a.href = url;
+      const safeTitle = (grant?.title || "grantpulse-draft").replace(/[^A-Za-z0-9 \-_]/g, "").slice(0, 60).trim() || "grantpulse-draft";
+      a.download = `${safeTitle}.docx`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      toast.success("Draft exported");
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Export failed");
+    }
+  };
+
   if (!grant) return <div className="font-mono text-xs uppercase tracking-[0.3em] text-neutral-600">Loading…</div>;
 
   return (
@@ -166,7 +185,15 @@ export default function GrantDetail() {
               {drafting ? "Drafting…" : "Generate Draft"}
             </button>
           ) : (
-            <div className="flex gap-3">
+            <div className="flex gap-3 flex-wrap">
+              <button
+                data-testid="export-docx-btn"
+                onClick={exportDocx}
+                disabled={draft.status === "generating"}
+                className="inline-flex items-center gap-2 border border-neutral-700 hover:border-amber-500/50 text-xs uppercase tracking-[0.2em] px-4 py-2.5 rounded-sm transition-colors disabled:opacity-50"
+              >
+                <Download className="w-3.5 h-3.5" /> Export DOCX
+              </button>
               <button
                 data-testid="save-draft-btn"
                 onClick={save}

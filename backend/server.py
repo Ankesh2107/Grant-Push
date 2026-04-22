@@ -26,6 +26,8 @@ from fastapi.responses import Response
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, EmailStr, Field
 from pypdf import PdfReader
+from docx import Document
+from docx.shared import Pt, RGBColor
 from starlette.middleware.cors import CORSMiddleware
 
 from emergentintegrations.llm.chat import LlmChat, UserMessage
@@ -610,6 +612,76 @@ async def approve_draft(did: str, user: dict = Depends(current_user)):
         {"$set": {"stage": "submitted", "updated_at": now}},
     )
     return {"ok": True, "submitted_at": now}
+
+
+def _build_docx(draft: dict, grant: dict, persona: dict) -> bytes:
+    """Render a draft into a formatted DOCX document."""
+    doc = Document()
+    # Base style
+    style = doc.styles["Normal"]
+    style.font.name = "Calibri"
+    style.font.size = Pt(11)
+
+    # Cover block
+    title = doc.add_heading(grant.get("title") or "RFP Response", level=0)
+    for run in title.runs:
+        run.font.color.rgb = RGBColor(0x0A, 0x0A, 0x0A)
+    meta = doc.add_paragraph()
+    meta.add_run(f"Submitted by: {persona.get('company_name') or '—'}\n").bold = True
+    meta.add_run(f"Agency: {grant.get('agency') or '—'}\n")
+    meta.add_run(f"Opportunity ID: {grant.get('external_id') or '—'}\n")
+    meta.add_run(f"Deadline: {grant.get('deadline') or '—'}\n")
+    meta.add_run(f"Probability of Win: {grant.get('pow_score', 0)}%\n")
+    doc.add_paragraph("")
+
+    # Body: parse markdown-ish content (# H1, ## H2, blank lines = paragraph breaks)
+    body = draft.get("content") or ""
+    for line in body.splitlines():
+        stripped = line.rstrip()
+        if not stripped:
+            doc.add_paragraph("")
+            continue
+        if stripped.startswith("# "):
+            doc.add_heading(stripped[2:].strip(), level=1)
+        elif stripped.startswith("## "):
+            doc.add_heading(stripped[3:].strip(), level=2)
+        elif stripped.startswith("### "):
+            doc.add_heading(stripped[4:].strip(), level=3)
+        elif stripped.startswith("- ") or stripped.startswith("* "):
+            doc.add_paragraph(stripped[2:].strip(), style="List Bullet")
+        else:
+            doc.add_paragraph(stripped)
+
+    # Footer note
+    foot = doc.add_paragraph()
+    foot.add_run(
+        f"\n\nDrafted by GrantPulse · Status: {draft.get('status','').upper()} · Draft ID: {draft.get('id')}"
+    ).italic = True
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+@api.get("/drafts/{did}/export")
+async def export_draft_docx(did: str, user: dict = Depends(current_user)):
+    draft = await db.drafts.find_one({"id": did, "user_id": user["id"]}, {"_id": 0})
+    if not draft:
+        raise HTTPException(404, "Not found")
+    if draft.get("status") == "generating":
+        raise HTTPException(409, "Draft is still generating")
+    if not (draft.get("content") or "").strip():
+        raise HTTPException(400, "Draft has no content to export")
+    grant = await db.grants.find_one({"id": draft["grant_id"]}, {"_id": 0}) or {}
+    persona = await db.personas.find_one({"user_id": user["id"]}, {"_id": 0}) or {}
+    data = _build_docx(draft, grant, persona)
+    safe_title = "".join(c for c in (grant.get("title") or "grantpulse-draft") if c.isalnum() or c in " -_")[:60].strip() or "grantpulse-draft"
+    filename = f"{safe_title}.docx"
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 # ---- Routes: Vault (PDF upload) ----
