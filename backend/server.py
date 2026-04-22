@@ -186,6 +186,38 @@ def _llm_chat(session_id: str, system: str) -> LlmChat:
     ).with_model("anthropic", "claude-sonnet-4-5-20250929")
 
 
+def _run_llm_sync(chat: LlmChat, msg: UserMessage) -> str:
+    """Run a single LlmChat.send_message call in a fresh event loop.
+
+    emergentintegrations' send_message is declared async but the underlying
+    LiteLLM call performs blocking HTTP I/O and tight retry loops that can
+    stall the main asyncio event loop. Running it inside its own loop on a
+    threadpool thread keeps the API responsive.
+    """
+    return asyncio.run(chat.send_message(msg))
+
+
+async def _llm_send_with_retry(chat: LlmChat, msg: UserMessage, retries: int = 3) -> str:
+    """Send an LLM message with exponential backoff on transient upstream errors."""
+    last = None
+    for i in range(retries):
+        try:
+            return await asyncio.to_thread(_run_llm_sync, chat, msg)
+        except Exception as exc:  # pragma: no cover - depends on upstream
+            last = exc
+            err_str = str(exc).lower()
+            # Budget exceeded / auth errors: fail fast, do not retry
+            if "budget" in err_str or "unauthorized" in err_str or "401" in err_str or "api key" in err_str:
+                raise
+            if any(k in err_str for k in ("502", "bad gateway", "rate", "timeout", "overloaded", "503")):
+                wait = 2 * (i + 1)
+                logger.warning(f"LLM transient error (attempt {i+1}): {exc}; retrying in {wait}s")
+                await asyncio.sleep(wait)
+                continue
+            raise
+    raise last  # type: ignore[misc]
+
+
 async def score_grant_vs_persona(grant: dict, persona: dict) -> dict:
     """Return {'score': int, 'reasoning': str, 'summary': str}."""
     system = (
@@ -209,7 +241,14 @@ Score 0-100 based on: capability fit, keyword overlap, geographic alignment, pas
 
 Return JSON only."""
     chat = _llm_chat(f"score-{new_id()}", system)
-    raw = await chat.send_message(UserMessage(text=prompt))
+    try:
+        raw = await _llm_send_with_retry(chat, UserMessage(text=prompt), retries=1)
+    except Exception as exc:
+        logger.warning(f"score primary failed: {exc}; falling back to gpt-5.1")
+        fallback = LlmChat(
+            api_key=EMERGENT_KEY, session_id=f"score-fb-{new_id()}", system_message=system,
+        ).with_model("openai", "gpt-5.1")
+        raw = await _llm_send_with_retry(fallback, UserMessage(text=prompt), retries=1)
     text = raw.strip()
     if text.startswith("```"):
         text = text.strip("`")
@@ -262,8 +301,21 @@ Produce a complete draft with these sections (use markdown headings):
 # Budget Narrative
 
 Keep professional tone, 1200-1800 words total. Do not include placeholder brackets."""
-    chat = _llm_chat(f"draft-{new_id()}", system)
-    return await chat.send_message(UserMessage(text=prompt))
+    try:
+        chat = _llm_chat(f"draft-{new_id()}", system)
+        return await _llm_send_with_retry(chat, UserMessage(text=prompt), retries=1)
+    except Exception as exc:
+        logger.error(f"draft_proposal primary (claude) failed: {exc}; falling back to gpt-5.1")
+        try:
+            fallback = LlmChat(
+                api_key=EMERGENT_KEY,
+                session_id=f"draft-fb-{new_id()}",
+                system_message=system,
+            ).with_model("openai", "gpt-5.1")
+            return await _llm_send_with_retry(fallback, UserMessage(text=prompt), retries=2)
+        except Exception as exc2:
+            logger.error(f"draft_proposal fallback also failed: {exc2}")
+            raise exc2
 
 
 # ---- Grant fetching (Grants.gov public API) ----
@@ -390,7 +442,7 @@ async def _run_scout_for_user(user: dict) -> dict:
             "pow_score": scored["score"],
             "reasoning": scored["reasoning"],
             "summary": scored["summary"],
-            "stage": "matched" if scored["score"] >= 85 else "matched",
+            "stage": "matched" if scored["score"] >= 85 else "matched",  # noqa
             "high_match": scored["score"] >= 85,
             "draft_id": None,
             "created_at": utcnow_iso(),
@@ -473,19 +525,18 @@ async def create_draft(gid: str, user: dict = Depends(current_user)):
     if not grant:
         raise HTTPException(404, "Grant not found")
     persona = await db.personas.find_one({"user_id": user["id"]}, {"_id": 0}) or {}
-    # Pull past proposal texts
     past = await db.vault_files.find(
         {"user_id": user["id"], "is_deleted": False}, {"_id": 0}
     ).to_list(10)
     past_texts = [p.get("extracted_text", "")[:6000] for p in past if p.get("extracted_text")]
-    content = await draft_proposal(grant, persona, past_texts)
     did = new_id()
     doc = {
         "id": did,
         "user_id": user["id"],
         "grant_id": gid,
-        "content": content,
-        "status": "review",
+        "content": "",
+        "status": "generating",
+        "error": None,
         "created_at": utcnow_iso(),
         "approved_at": None,
         "submitted_at": None,
@@ -493,9 +544,35 @@ async def create_draft(gid: str, user: dict = Depends(current_user)):
     await db.drafts.insert_one(doc)
     await db.grants.update_one(
         {"id": gid},
-        {"$set": {"stage": "review", "draft_id": did, "updated_at": utcnow_iso()}},
+        {"$set": {"stage": "drafting", "draft_id": did, "updated_at": utcnow_iso()}},
     )
-    return clean_mongo(doc)
+
+    async def _generate():
+        try:
+            content = await draft_proposal(grant, persona, past_texts)
+            await db.drafts.update_one(
+                {"id": did},
+                {"$set": {"content": content, "status": "review", "updated_at": utcnow_iso()}},
+            )
+            await db.grants.update_one(
+                {"id": gid}, {"$set": {"stage": "review", "updated_at": utcnow_iso()}}
+            )
+        except Exception as exc:
+            msg = str(exc)
+            logger.error(f"draft gen failed {did}: {msg}")
+            friendly = msg[:500]
+            if "budget" in msg.lower():
+                friendly = (
+                    "LLM budget exhausted on the Emergent universal key. "
+                    "Top up your balance (Profile → Universal Key → Add Balance) and retry."
+                )
+            await db.drafts.update_one(
+                {"id": did},
+                {"$set": {"status": "failed", "error": friendly, "updated_at": utcnow_iso()}},
+            )
+
+    asyncio.create_task(_generate())
+    return clean_mongo({k: v for k, v in doc.items()})
 
 
 @api.get("/drafts/{did}")
@@ -674,7 +751,11 @@ async def payment_status(session_id: str, request: Request, user: dict = Depends
     host_url = str(request.base_url).rstrip("/")
     webhook_url = f"{host_url}/api/webhook/stripe"
     stripe = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=webhook_url)
-    status: CheckoutStatusResponse = await stripe.get_checkout_status(session_id)
+    try:
+        status: CheckoutStatusResponse = await stripe.get_checkout_status(session_id)
+    except Exception as exc:
+        logger.warning(f"stripe status lookup failed {session_id}: {exc}")
+        raise HTTPException(404, "Session not found or expired")
     txn = await db.payment_transactions.find_one({"session_id": session_id}, {"_id": 0})
     if txn and txn.get("payment_status") != "paid" and status.payment_status == "paid":
         # Upgrade user to pro (once)

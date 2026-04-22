@@ -38,11 +38,36 @@ export default function GrantDetail() {
     try {
       const { data } = await api.post(`/grants/${id}/draft`);
       setDraft(data);
-      setContent(data.content);
-      toast.success("Draft generated");
+      toast.info("Drafting engine spinning up — this can take 60-120s");
+      // Poll until generation is done
+      const pollStart = Date.now();
+      const poll = async () => {
+        if (Date.now() - pollStart > 240000) {
+          toast.error("Draft is taking longer than expected. Try again.");
+          setDrafting(false);
+          return;
+        }
+        try {
+          const { data: d } = await api.get(`/drafts/${data.id}`);
+          if (d.status === "review" || d.status === "submitted") {
+            setDraft(d);
+            setContent(d.content);
+            toast.success("Draft ready for review");
+            setDrafting(false);
+            await load();
+            return;
+          }
+          if (d.status === "failed") {
+            toast.error("Drafting failed: " + (d.error || "unknown"));
+            setDrafting(false);
+            return;
+          }
+        } catch {}
+        setTimeout(poll, 4000);
+      };
+      setTimeout(poll, 4000);
     } catch (e) {
       toast.error(e.response?.data?.detail || "Draft failed");
-    } finally {
       setDrafting(false);
     }
   };
@@ -169,13 +194,23 @@ export default function GrantDetail() {
         </div>
 
         {draft ? (
-          <textarea
-            data-testid="draft-editor"
-            value={content}
-            onChange={(e) => setContent(e.target.value)}
-            disabled={draft.status === "submitted"}
-            className="w-full h-[600px] bg-black border border-neutral-800 focus:border-amber-500 focus:ring-1 focus:ring-amber-500 text-sm p-6 font-mono leading-relaxed text-neutral-200 outline-none rounded-sm"
-          />
+          draft.status === "generating" ? (
+            <div className="border border-amber-500/30 bg-amber-500/5 py-20 text-center" data-testid="draft-generating">
+              <div className="inline-flex items-center gap-3 font-mono text-[11px] uppercase tracking-[0.25em] text-amber-500">
+                <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+                Drafting engine is composing your response…
+              </div>
+              <div className="text-xs text-neutral-500 mt-4">Typically 60–120 seconds. Feel free to navigate away — results persist.</div>
+            </div>
+          ) : (
+            <textarea
+              data-testid="draft-editor"
+              value={content}
+              onChange={(e) => setContent(e.target.value)}
+              disabled={draft.status === "submitted"}
+              className="w-full h-[600px] bg-black border border-neutral-800 focus:border-amber-500 focus:ring-1 focus:ring-amber-500 text-sm p-6 font-mono leading-relaxed text-neutral-200 outline-none rounded-sm"
+            />
+          )
         ) : (
           <div className="border border-dashed border-neutral-800 py-20 text-center">
             <Sparkles className="w-6 h-6 text-neutral-700 mx-auto mb-4" />
