@@ -1,0 +1,54 @@
+{
+  "summary": "Ran full backend regression (21 tests) + frontend smoke test on GrantPulse. 18/21 backend tests passing (85.7%). Core auth, persona, scout, grant CRUD, stage transitions, free-tier gating, vault upload/list/delete, stripe checkout creation, and notifications all work. Two serious integration issues: (1) POST /api/grants/{id}/draft times out at the preview gateway (60s limit) because Claude Sonnet 4.5 drafting takes longer — returns 502 to clients; (2) GET /api/payments/status/{id} returns raw 500 when Stripe session is unknown/expired instead of a proper 400/404. Frontend landing, signup, login, pricing, pipeline and dashboard routes all render with executive dark/amber theme.",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "POST /api/grants/{id}/draft", "issue": "Claude Sonnet 4.5 call is synchronous; generation exceeds ~60s preview gateway timeout and client receives 502 Bad Gateway. Backend also does not catch litellm.BadGatewayError so any transient LLM 502 bubbles to 500. Must be refactored into a background task with polling (e.g., POST creates draft record with status='generating', a worker fills content, frontend polls GET /api/drafts/{id}). Also wrap LLM calls in try/except with retry.", "priority": "CRITICAL"},
+      {"endpoint": "GET /api/payments/status/{session_id}", "issue": "Raises CheckoutError -> uncaught -> 500 when session_id is unknown/expired. Wrap in try/except and return 404 with clear message.", "priority": "HIGH"}
+    ],
+    "minor": [
+      {"endpoint": "POST /api/scout/run", "issue": "Sequentially scores 15 grants via LLM; took ~4 minutes in test. Works but close to timeout. Consider batching / asyncio.gather with concurrency cap, or switch to background job."},
+      {"endpoint": "_run_scout_for_user", "issue": "stage field is set with `'matched' if score>=85 else 'matched'` — both branches identical (server.py:393). Logic likely intended to differ; not harmful today since stage is 'matched' by design, but high_match flag is the real gate. Clean up dead conditional."},
+      {"endpoint": "POST /api/scout/run", "issue": "Free-tier gate is a no-op: comment says 'Still allow the scan but only surface 1 lead' but free_leads_used is never incremented. The counter is dead code."},
+      {"endpoint": "POST /api/auth/signup", "issue": "Pydantic EmailStr rejects `.test` TLD (reserved). Consumer-facing only; fine for production."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {"flow": "Grant Detail -> Generate Draft", "issue": "Because backend draft endpoint times out at 60s, the frontend button click will almost certainly show a failure/502 to users. The frontend needs to move to polling-based UX once backend is refactored to async generation.", "affected_selectors": ["Generate Draft button on /grants/:id"]}
+    ],
+    "design_issues": [
+      {"screen": "Landing / Signup / Login", "issues": ["Executive dark theme with amber accents renders well", "Hero 'Win the grants you deserve.' copy and 'Autonomous Scouting Active' badge show correctly", "Trust boundary 'The agent drafts. You approve.' visible on /signup side panel — good"]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_grantpulse.py",
+    "/app/test_reports/pytest/iteration_1.xml"
+  ],
+  "action_items": [
+    "Refactor POST /api/grants/{id}/draft to create a draft row with status='generating' and run draft_proposal() in a FastAPI BackgroundTask / asyncio.create_task. Frontend polls GET /api/drafts/{id} until status != 'generating'. Current implementation will 502 in production for any real user.",
+    "Wrap draft_proposal/LLM calls in try/except for litellm.BadGatewayError with 1-2 retries and surface a 503 to client if all retries fail.",
+    "Wrap stripe.get_checkout_status in try/except CheckoutError -> return 404 with {'detail': 'session not found'}.",
+    "Remove the dead `'matched' if score>=85 else 'matched'` conditional at server.py:393 — clarify intended behaviour (probably high_match stays on 'matched' column but flagged via high_match=True, which is already the case).",
+    "Scout endpoint: parallelize score_grant_vs_persona with asyncio.gather(*, semaphore) to reduce latency from 4 min to <60s."
+  ],
+  "critical_code_review_comments": [
+    "server.py is 782 lines — should be split into routers (auth, grants, drafts, vault, payments) + services/llm.py + services/grants_gov.py.",
+    "No rate limiting on /api/scout/run — a free user can trigger unlimited LLM scoring (cost vector).",
+    "JWT_SECRET falls back to 'dev-secret' in .env (`grantpulse-super-secret-change-me-in-prod`) — acceptable for dev, flag for prod.",
+    "init_storage is sync `requests` inside async app startup — blocks event loop; switch to httpx async.",
+    "Grant listing does not paginate (to_list(500)).",
+    "No input length validation on PersonaReq list fields — user could send huge keywords list.",
+    "Upload endpoint reads entire PDF into memory; no size limit → DoS surface. Add max size check."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_grantpulse.py (created)"
+  ],
+  "success_rate": {"backend": "85.7% (18/21, with 2 skipped due to draft failure chain)", "frontend": "Landing, signup, login pages verified rendering OK; deeper flows not automated due to draft timeout blocker"},
+  "test_credentials": "admin@grantpulse.io / Admin@12345 (pro); signup creates free users.",
+  "seed_data_creation": "Created TEST_user_<uuid>@example.com free user via signup fixture; admin persona (keywords: energy, research) set during scout test; ~15 grants + 1 successful draft approved/submitted in admin account from first scout run.",
+  "retest_needed": true,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "test_grantpulse.py covers all endpoints. Re-run WITHOUT the draft tests if backend still has synchronous draft: use `-k 'not test_create_draft_admin and not test_approve_draft'`. Scout test takes ~4-5 min. Admin already has seeded grants from previous run; future scout runs will dedupe. To test draft flow end-to-end, main agent must first refactor to async generation — once done, test_create_draft_admin should return 200 quickly (queued) and polling will confirm completion.",
+  "rca of the issue": "Draft 502 RCA: FastAPI handler `create_draft` awaits `draft_proposal()` which calls Claude Sonnet 4.5 via emergentintegrations -> litellm -> upstream. Generation of a 1200-1800 word proposal with 2-3 past proposal excerpts as context typically takes 60-120s. The Kubernetes ingress / preview gateway enforces a ~60s idle/response timeout and returns 502 to clients while the backend is still generating. Additionally, when the upstream LLM returns transient 502, litellm raises BadGatewayError which is not caught, so FastAPI returns 500. Reproduction: POST /api/grants/{id}/draft with Bearer (admin pro token) on a valid grant — fails at ~60s with 'The preview environment is not responding. It may be starting up.' Fix: convert to background task + polling pattern; wrap LLM calls with retry + explicit 503 on persistent failure."
+}
