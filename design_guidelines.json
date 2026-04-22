@@ -1,0 +1,158 @@
+{
+  "project_name": "GrantPulse",
+  "theme": "dark",
+  "archetype": "Archetype 4: Swiss & High-Contrast",
+  "design_philosophy": "Executive Dark Mode. High-stakes, minimal, authoritative. No generic SaaS gradients. Color is used strictly for function (e.g., Amber for high 'Probability of Win' scores). The interface feels like a secure, precision financial or military command center.",
+  "typography": {
+    "headings": {
+      "family": "Cabinet Grotesk",
+      "weights": ["light", "bold", "black"],
+      "usage": "H1/H2 use extreme tight tracking. No Inter.",
+      "styles": {
+        "h1": "text-5xl sm:text-6xl+ font-black tracking-tighter leading-none",
+        "h2": "text-3xl sm:text-4xl font-bold tracking-tight",
+        "h3": "text-xl sm:text-2xl font-bold",
+        "h4": "text-lg sm:text-xl font-bold"
+      }
+    },
+    "body": {
+      "family": "IBM Plex Sans",
+      "weights": ["regular", "medium"],
+      "usage": "Used for all readable text, forms, and standard dashboard elements.",
+      "styles": {
+        "base": "text-base leading-relaxed tracking-normal text-neutral-300",
+        "small": "text-sm text-neutral-400"
+      }
+    },
+    "data_and_mono": {
+      "family": "IBM Plex Mono",
+      "usage": "Probability of Win scores, RFPs IDs, timestamps.",
+      "styles": {
+        "score": "text-4xl font-light tracking-tight text-amber-500",
+        "label": "text-xs uppercase tracking-[0.2em] font-medium text-neutral-500"
+      }
+    }
+  },
+  "colors": {
+    "background": {
+      "base": "#030303",
+      "surface": "#0C0C0C",
+      "elevated": "#141414"
+    },
+    "text": {
+      "primary": "#FFFFFF",
+      "secondary": "#A3A3A3",
+      "muted": "#525252",
+      "inverse": "#000000"
+    },
+    "border": {
+      "default": "#262626",
+      "subtle": "#171717",
+      "focus": "#F59E0B"
+    },
+    "brand": {
+      "primary": "#F59E0B",
+      "primary_hover": "#D97706",
+      "primary_muted": "rgba(245, 158, 11, 0.1)"
+    },
+    "status": {
+      "success": "#10B981",
+      "warning": "#F59E0B",
+      "error": "#EF4444",
+      "info": "#3B82F6"
+    }
+  },
+  "spacing_and_layout": {
+    "philosophy": "Generous Spacing + The 'Control Room' Grid. Minimalist UI with dense functional areas surrounded by vast negative space.",
+    "container_padding": "p-6 md:p-12 lg:p-16",
+    "dashboard_grid": "grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-4",
+    "kanban_layout": "flex overflow-x-auto gap-6 pb-8 snap-x",
+    "corners": "rounded-none md:rounded-sm",
+    "borders": "1px solid #262626. Use 'Grid Borders' pattern where possible to expose the skeleton of the layout."
+  },
+  "components": {
+    "buttons": {
+      "primary": "bg-amber-500 text-black hover:bg-amber-600 rounded-sm font-medium tracking-wide transition-colors uppercase text-xs tracking-[0.1em]",
+      "secondary": "bg-transparent border border-neutral-700 text-white hover:border-neutral-500 rounded-sm transition-all",
+      "ghost": "text-neutral-400 hover:text-white hover:bg-neutral-900 rounded-sm"
+    },
+    "cards": {
+      "style": "bg-[#0C0C0C] border border-neutral-800 rounded-sm overflow-hidden",
+      "hover": "hover:border-neutral-600 transition-colors"
+    },
+    "inputs": {
+      "style": "bg-black border border-neutral-800 text-white rounded-sm focus:ring-1 focus:ring-amber-500 focus:border-amber-500",
+      "labels": "text-xs uppercase tracking-widest text-neutral-500 mb-2 block"
+    },
+    "navigation": {
+      "header": "sticky top-0 z-50 bg-[#030303]/80 backdrop-blur-xl border-b border-neutral-800 h-16"
+    },
+    "kanban_board": {
+      "column": "w-80 flex-shrink-0 flex flex-col gap-4 bg-[#0A0A0A] border border-neutral-800 p-4 rounded-sm",
+      "card": "bg-[#141414] border border-neutral-800 p-4 cursor-grab hover:border-amber-500/50 transition-colors"
+    },
+    "badges": {
+      "high_match": "bg-amber-500/10 text-amber-500 border border-amber-500/20 text-xs uppercase px-2 py-1 rounded-sm tracking-wider"
+    }
+  },
+  "media": {
+    "hero_image": {
+      "url": "https://static.prod-images.emergentagent.com/jobs/3ce85cff-a5e6-4f79-8b95-ddedb9f011d0/images/01cf2dc0c2ff685bb113c5105ea320d208454f493cde3f9834edc6d54fdf7db1.png",
+      "description": "Abstract glowing data stream turning into a document, used for landing page hero background. Use with heavy dark overlay (bg-black/60) to ensure text legibility."
+    },
+    "background_texture": {
+      "url": "https://static.prod-images.emergentagent.com/jobs/3ce85cff-a5e6-4f79-8b95-ddedb9f011d0/images/a1e0326af2900e36309660ff868abff2f7b92fbbb622e615eda9332fbb83145c.png",
+      "description": "Minimalist topographic map with amber contours. Use in pricing section or persona setup background with low opacity (10-20%)."
+    },
+    "logo_placeholder": {
+      "url": "https://images.unsplash.com/photo-1671488618997-dfab26d9d48e?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxOTF8MHwxfHNlYXJjaHwxfHxhYnN0cmFjdCUyMGRhdGElMjBwaXBlbGluZSUyMGRhcmslMjBiYWNrZ3JvdW5kfGVufDB8fHx8MTc3Njg3MDEyNHww&ixlib=rb-4.1.0&q=85",
+      "description": "Abstract wave used for placeholder avatar or generic visual element."
+    }
+  },
+  "pages": {
+    "landing": {
+      "structure": "Hero with 3D abstract media background -> Value Prop (Grid Borders) -> How it works -> Pricing ($199/mo Pro Tier) -> CTA",
+      "hero_overlay": "MUST use bg-gradient-to-r from-black via-black/80 to-transparent over the hero image. Left-align typography."
+    },
+    "auth": {
+      "layout": "Split screen. Left: Abstract topographic background. Right: Minimalist form (login/signup) centered in its column."
+    },
+    "dashboard": {
+      "layout": "Control Room Grid. Top row: Key metrics (Active Scouts, Pipeline Matches, Pending Reviews). Below: Recent activity feed.",
+      "metrics": "Use large IBM Plex Mono for numbers. Example: 89% PoW."
+    },
+    "kanban": {
+      "layout": "Horizontal scrollable board. Columns: Matched, Drafting, Review Required, Submitted. Cards should show RFP ID, Company Name, and PoW Score.",
+      "interactions": "Hover states on cards should lighten the border. Scrollbar should be hidden or extremely minimal."
+    },
+    "grant_detail": {
+      "layout": "2-column layout. Left: Metadata (Deadline, Amount, Agency). Right: Detailed PoW calculation breakdown and Action buttons."
+    },
+    "draft_review": {
+      "layout": "Distraction-free writing interface. Left: Source material/RFP requirements. Right: AI Draft editor.",
+      "critical_action": "Manual 'Approve & Submit' button MUST be prominent, colored Amber, requiring explicit confirmation (Trust Boundary)."
+    },
+    "persona_setup": {
+      "layout": "Multi-step or long-scroll form. Sections: Basic Info, Capabilities, Past Performance, Tech Keywords, Geo Focus."
+    },
+    "upload_vault": {
+      "layout": "Drag and drop zone with dashed border (border-neutral-700) + list of uploaded PDFs (tone references)."
+    },
+    "pricing": {
+      "layout": "Bento grid or 2 large cards. Free (1 lead/mo) vs Pro ($199/mo). Pro tier gets the 'Tracing Beam' glowing border effect."
+    }
+  },
+  "animations": {
+    "hover_states": "Fast, crisp transitions (150ms ease). Buttons invert colors.",
+    "page_load": "Subtle fade up for dashboard elements using framer-motion. Stagger children by 0.05s."
+  },
+  "icons": {
+    "library": "phosphor-icons/react",
+    "style": "Duotone or bold weight depending on emphasis. Used sparingly."
+  },
+  "technical_rules": {
+    "testing": "All interactive elements MUST have data-testid attributes (e.g., data-testid='approve-submit-button').",
+    "accessibility": "Contrast ratios MUST meet WCAG AA. Focus states must use focus:ring-amber-500.",
+    "components_lib": "Use Shadcn UI with severe custom styling (border-radius: 0 or 2px, dark mode enforced)."
+  }
+}
