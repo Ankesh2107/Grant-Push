@@ -179,143 +179,38 @@ def clean_mongo(doc: dict) -> dict:
 
 
 # ---- LLM helpers ----
-def _llm_chat(session_id: str, system: str) -> LlmChat:
-    return LlmChat(
-        api_key=EMERGENT_KEY, session_id=session_id, system_message=system
-    ).with_model("anthropic", "claude-sonnet-4-5-20250929")
+from openai import AsyncOpenAI
+import stripe
+import os
 
+stripe.api_key = STRIPE_API_KEY
 
-def _run_llm_sync(chat: LlmChat, msg: UserMessage) -> str:
-    """Run a single LlmChat.send_message call in a fresh event loop.
+# ---- LLM helpers ----
+from openai import AsyncOpenAI
+import stripe
+import os
+import json
 
-    emergentintegrations' send_message is declared async but the underlying
-    LiteLLM call performs blocking HTTP I/O and tight retry loops that can
-    stall the main asyncio event loop. Running it inside its own loop on a
-    threadpool thread keeps the API responsive.
-    """
-    return asyncio.run(chat.send_message(msg))
-
-
-async def _llm_send_with_retry(chat: LlmChat, msg: UserMessage, retries: int = 3) -> str:
-    """Send an LLM message with exponential backoff on transient upstream errors."""
-    last = None
-    for i in range(retries):
-        try:
-            return await asyncio.to_thread(_run_llm_sync, chat, msg)
-        except Exception as exc:  # pragma: no cover - depends on upstream
-            last = exc
-            err_str = str(exc).lower()
-            # Budget exceeded / auth errors: fail fast, do not retry
-            if "budget" in err_str or "unauthorized" in err_str or "401" in err_str or "api key" in err_str:
-                raise
-            if any(k in err_str for k in ("502", "bad gateway", "rate", "timeout", "overloaded", "503")):
-                wait = 2 * (i + 1)
-                logger.warning(f"LLM transient error (attempt {i+1}): {exc}; retrying in {wait}s")
-                await asyncio.sleep(wait)
-                continue
-            raise
-    raise last  # type: ignore[misc]
-
+stripe.api_key = STRIPE_API_KEY
 
 async def score_grant_vs_persona(grant: dict, persona: dict) -> dict:
-    """Return {'score': int, 'reasoning': str, 'summary': str}."""
-    system = (
-        "You are GrantPulse's vetting engine. You analyze how well a company persona "
-        "matches an RFP/grant opportunity. Respond with STRICT JSON only, no prose."
-    )
-    prompt = f"""Analyze this match. Output JSON with keys: score (0-100 integer), reasoning (2-3 sentences explaining the score factors), summary (3-sentence executive summary of the grant).
-
-COMPANY PERSONA:
-{json.dumps(persona, indent=2)}
-
-GRANT/RFP:
-Title: {grant.get('title')}
-Agency: {grant.get('agency')}
-Description: {grant.get('description','')[:3000]}
-Funding: {grant.get('funding_amount','N/A')}
-Deadline: {grant.get('deadline','N/A')}
-Category: {grant.get('category','')}
-
-Score 0-100 based on: capability fit, keyword overlap, geographic alignment, past performance relevance. Be precise; use full 0-100 range.
-
-Return JSON only."""
-    chat = _llm_chat(f"score-{new_id()}", system)
+    system = "You are GrantPulse's vetting engine. You analyze how well a company persona matches an RFP/grant opportunity. Respond with STRICT JSON only."
+    prompt = f"Analyze this match. Output JSON with keys: score (0-100 integer), reasoning (2-3 sentences), summary (3-sentence executive summary).\n\nCOMPANY PERSONA:\n{json.dumps(persona, indent=2)}\n\nGRANT/RFP:\nTitle: {grant.get('title')}\nAgency: {grant.get('agency')}\nDescription: {grant.get('description','')[:3000]}"
     try:
-        raw = await _llm_send_with_retry(chat, UserMessage(text=prompt), retries=1)
-    except Exception as exc:
-        logger.warning(f"score primary failed: {exc}; falling back to gpt-5.1")
-        fallback = LlmChat(
-            api_key=EMERGENT_KEY, session_id=f"score-fb-{new_id()}", system_message=system,
-        ).with_model("openai", "gpt-5.1")
-        raw = await _llm_send_with_retry(fallback, UserMessage(text=prompt), retries=1)
-    text = raw.strip()
-    if text.startswith("```"):
-        text = text.strip("`")
-        if text.startswith("json"):
-            text = text[4:]
-        text = text.strip()
-    try:
-        data = json.loads(text)
-        score = int(data.get("score", 0))
-        score = max(0, min(100, score))
-        return {
-            "score": score,
-            "reasoning": str(data.get("reasoning", ""))[:1000],
-            "summary": str(data.get("summary", ""))[:600],
-        }
+        # Pointing the OpenAI library to Groq's free servers
+        client = AsyncOpenAI(api_key=os.environ.get("GROQ_API_KEY"), base_url="https://api.groq.com/openai/v1")
+        res = await client.chat.completions.create(model="llama-3.3-70b-versatile", messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}], temperature=0.2)
+        data = json.loads(res.choices[0].message.content.strip("`").replace("json", "", 1).strip())
+        return {"score": int(data.get("score", 0)), "reasoning": str(data.get("reasoning", ""))[:1000], "summary": str(data.get("summary", ""))[:600]}
     except Exception as e:
-        logger.error(f"LLM score parse failed: {e} / raw={raw[:400]}")
-        return {"score": 0, "reasoning": "Unable to score", "summary": grant.get("description", "")[:300]}
+        return {"score": 0, "reasoning": "Scoring failed", "summary": "N/A"}
 
-
-async def draft_proposal(grant: dict, persona: dict, past_proposals_text: List[str]) -> str:
-    system = (
-        "You are GrantPulse's elite proposal drafter. You write technically precise, "
-        "executive-grade RFP responses that mirror the tone and structure of the user's "
-        "past successful proposals. Use their voice and terminology. Never fabricate "
-        "past performance — only use what's in the persona."
-    )
-    past_context = "\n\n---\n\n".join(p[:4000] for p in past_proposals_text[:3]) or "(No past proposals provided)"
-    prompt = f"""Draft a full RFP response for this opportunity.
-
-COMPANY PERSONA:
-{json.dumps(persona, indent=2)}
-
-PAST PROPOSAL EXCERPTS (mirror this tone and language):
-{past_context}
-
-OPPORTUNITY:
-Title: {grant.get('title')}
-Agency: {grant.get('agency')}
-Description: {grant.get('description','')[:4000]}
-Funding: {grant.get('funding_amount','N/A')}
-Deadline: {grant.get('deadline','N/A')}
-
-Produce a complete draft with these sections (use markdown headings):
-# Executive Summary
-# Technical Approach
-# Company Capabilities & Past Performance
-# Management & Staffing Plan
-# Timeline & Deliverables
-# Budget Narrative
-
-Keep professional tone, 1200-1800 words total. Do not include placeholder brackets."""
-    try:
-        chat = _llm_chat(f"draft-{new_id()}", system)
-        return await _llm_send_with_retry(chat, UserMessage(text=prompt), retries=1)
-    except Exception as exc:
-        logger.error(f"draft_proposal primary (claude) failed: {exc}; falling back to gpt-5.1")
-        try:
-            fallback = LlmChat(
-                api_key=EMERGENT_KEY,
-                session_id=f"draft-fb-{new_id()}",
-                system_message=system,
-            ).with_model("openai", "gpt-5.1")
-            return await _llm_send_with_retry(fallback, UserMessage(text=prompt), retries=2)
-        except Exception as exc2:
-            logger.error(f"draft_proposal fallback also failed: {exc2}")
-            raise exc2
-
+async def draft_proposal(grant: dict, persona: dict, past_proposals_text: list) -> str:
+    system = "You are an elite proposal drafter. Mirror the tone of past proposals."
+    prompt = f"Draft a full RFP response.\nCOMPANY PERSONA: {json.dumps(persona)}\nOPPORTUNITY: {grant.get('title')}\nDesc: {grant.get('description','')[:4000]}"
+    client = AsyncOpenAI(api_key=os.environ.get("GROQ_API_KEY"), base_url="https://api.groq.com/openai/v1")
+    res = await client.chat.completions.create(model="llama-3.3-70b-versatile", messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}], temperature=0.5)
+    return res.choices[0].message.content
 
 # ---- Grant fetching (Grants.gov public API) ----
 GRANTS_API = "https://api.grants.gov/v1/api/search2"
@@ -781,90 +676,26 @@ async def dashboard_metrics(user: dict = Depends(current_user)):
 # ---- Routes: Stripe Payments ----
 @api.post("/payments/checkout")
 async def create_checkout(req: CheckoutReq, request: Request, user: dict = Depends(current_user)):
-    if req.package_id not in PRICE_PACKAGES:
-        raise HTTPException(400, "Invalid package")
-    amount = float(PRICE_PACKAGES[req.package_id])
-    host_url = str(request.base_url).rstrip("/")
-    webhook_url = f"{host_url}/api/webhook/stripe"
-    stripe = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=webhook_url)
-    success_url = f"{req.origin_url}/success?session_id={{CHECKOUT_SESSION_ID}}"
-    cancel_url = f"{req.origin_url}/pricing"
-    metadata = {"user_id": user["id"], "package_id": req.package_id, "email": user["email"]}
-    session: CheckoutSessionResponse = await stripe.create_checkout_session(
-        CheckoutSessionRequest(
-            amount=amount,
-            currency="usd",
-            success_url=success_url,
-            cancel_url=cancel_url,
-            metadata=metadata,
-        )
+    amount = int(PRICE_PACKAGES.get(req.package_id, 199) * 100)
+    session = stripe.checkout.Session.create(
+        payment_method_types=['card'],
+        line_items=[{'price_data': {'currency': 'usd', 'product_data': {'name': 'GrantPulse Pro'}, 'unit_amount': amount}, 'quantity': 1}],
+        mode='payment',
+        success_url=f"{req.origin_url}/success?session_id={{CHECKOUT_SESSION_ID}}",
+        cancel_url=f"{req.origin_url}/pricing",
+        metadata={"user_id": user["id"]}
     )
-    await db.payment_transactions.insert_one({
-        "id": new_id(),
-        "session_id": session.session_id,
-        "user_id": user["id"],
-        "email": user["email"],
-        "amount": amount,
-        "currency": "usd",
-        "package_id": req.package_id,
-        "payment_status": "pending",
-        "status": "initiated",
-        "metadata": metadata,
-        "created_at": utcnow_iso(),
-    })
-    return {"url": session.url, "session_id": session.session_id}
-
+    return {"url": session.url, "session_id": session.id}
 
 @api.get("/payments/status/{session_id}")
 async def payment_status(session_id: str, request: Request, user: dict = Depends(current_user)):
-    host_url = str(request.base_url).rstrip("/")
-    webhook_url = f"{host_url}/api/webhook/stripe"
-    stripe = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=webhook_url)
-    try:
-        status: CheckoutStatusResponse = await stripe.get_checkout_status(session_id)
-    except Exception as exc:
-        logger.warning(f"stripe status lookup failed {session_id}: {exc}")
-        raise HTTPException(404, "Session not found or expired")
-    txn = await db.payment_transactions.find_one({"session_id": session_id}, {"_id": 0})
-    if txn and txn.get("payment_status") != "paid" and status.payment_status == "paid":
-        # Upgrade user to pro (once)
-        await db.payment_transactions.update_one(
-            {"session_id": session_id},
-            {"$set": {"payment_status": "paid", "status": status.status, "updated_at": utcnow_iso()}},
-        )
-        await db.users.update_one(
-            {"id": user["id"]},
-            {"$set": {"plan": "pro", "upgraded_at": utcnow_iso()}},
-        )
-    return {
-        "status": status.status,
-        "payment_status": status.payment_status,
-        "amount_total": status.amount_total,
-        "currency": status.currency,
-    }
-
+    session = stripe.checkout.Session.retrieve(session_id)
+    if session.payment_status == "paid":
+        await db.users.update_one({"id": user["id"]}, {"$set": {"plan": "pro"}})
+    return {"status": session.status, "payment_status": session.payment_status, "amount_total": session.amount_total, "currency": session.currency}
 
 @api.post("/webhook/stripe")
 async def stripe_webhook(request: Request):
-    body = await request.body()
-    sig = request.headers.get("Stripe-Signature", "")
-    webhook_url = f"{str(request.base_url).rstrip('/')}/api/webhook/stripe"
-    stripe = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=webhook_url)
-    try:
-        ev = await stripe.handle_webhook(body, sig)
-    except Exception as e:
-        logger.error(f"webhook error: {e}")
-        return {"received": False}
-    if ev.payment_status == "paid":
-        user_id = (ev.metadata or {}).get("user_id")
-        if user_id:
-            await db.users.update_one(
-                {"id": user_id}, {"$set": {"plan": "pro", "upgraded_at": utcnow_iso()}}
-            )
-        await db.payment_transactions.update_one(
-            {"session_id": ev.session_id},
-            {"$set": {"payment_status": "paid", "status": "completed", "updated_at": utcnow_iso()}},
-        )
     return {"received": True}
 
 
